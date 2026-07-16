@@ -1,0 +1,54 @@
+name: Crypto Hourly Status
+
+# Sends the hourly Telegram status message: price table, SOL indicator readout,
+# and the rule-based BUY/SELL/WAIT recommendation.
+#
+# Split from crypto-signal.yml because the two want different cadences: flip
+# alerts poll every 5 minutes to catch a SAR flip fast, while this digest is
+# wanted once an hour. This run is --status-only, so it never detects a flip
+# and never writes crypto_state.json — crypto-signal.yml stays the sole owner
+# of that file. If this run reported a flip it would also consume it, and the
+# flip-alert workflow would then never fire for it.
+#
+# Timing here is best-effort by design: GitHub delays and sometimes drops
+# scheduled runs, so this may land late or skip an hour. That is acceptable for
+# a status digest — no trade depends on it. Nothing to catch up on either, since
+# each run reports current state rather than a diff.
+on:
+  schedule:
+    # Hourly at :05, shortly after the 1h candle closes.
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+# Read-only: this workflow never commits.
+permissions:
+  contents: read
+
+concurrency:
+  group: crypto-status
+  cancel-in-progress: false
+
+jobs:
+  send-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send hourly status
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python crypto_tracker.py --once --status-only --interval 1h

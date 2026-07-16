@@ -1,14 +1,25 @@
 name: Crypto SAR Signal
 
-# Runs the SAR-flip signal check every hour, in the cloud — no laptop needed.
-# The bot's last SAR side is stored in crypto_state.json, which this workflow
-# commits back to the repo whenever it changes, so hourly runs continue
+# Polls for a SAR flip on the last CLOSED hourly candle, in the cloud — no
+# laptop needed. The bot's last SAR side is stored in crypto_state.json, which
+# this workflow commits back to the repo whenever it changes, so runs continue
 # seamlessly across GitHub's ephemeral runners.
+#
+# The hourly status message lives in crypto-status.yml. This workflow is
+# flip-alerts only (SEND_STATUS_UPDATE=false) — at this cadence the status
+# table would otherwise arrive 288x a day.
 on:
   schedule:
-    # Every hour at :05, a few minutes after the hourly candle closes.
-    # NOTE: GitHub may delay scheduled runs by several minutes under load.
-    - cron: "5 * * * *"
+    # Every 5 minutes — GitHub's shortest allowed interval.
+    #
+    # This is deliberately far more often than the 1h candle it watches.
+    # GitHub's scheduler is best-effort: it delays scheduled runs under load and
+    # silently DROPS them entirely at peak, which is what made hourly runs land
+    # up to 2h apart. Flip detection compares the closed candle against saved
+    # state, not against the previous run, so it is idempotent — a dropped tick
+    # costs nothing and the next one still catches the flip. Polling often turns
+    # GitHub's unreliability from a 2h gap into a ~15min worst case.
+    - cron: "*/5 * * * *"
   # Lets you trigger a run manually from the Actions tab to test.
   workflow_dispatch:
 
@@ -44,6 +55,8 @@ jobs:
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Flip alerts only — the status table is crypto-status.yml's job.
+          SEND_STATUS_UPDATE: "false"
           # Optional — if unset, the AI insight line is simply omitted.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
@@ -57,6 +70,10 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add crypto_state.json
             git commit -m "chore: update SAR state [skip ci]"
+            # Rebase before pushing: main may have moved since checkout, and a
+            # rejected push here would lose the flip — the next run would then
+            # re-alert on the same flip it already sent.
+            git pull --rebase --autostash
             git push
           else
             echo "No SAR flip this run — nothing to persist."

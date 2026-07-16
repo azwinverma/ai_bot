@@ -461,6 +461,10 @@ def main():
     parser.add_argument("--once", action="store_true",
                         help="Run a single check and exit (for cron / GitHub Actions). "
                              "State is persisted in Firestore, so scheduled runs continue seamlessly.")
+    parser.add_argument("--status-only", action="store_true",
+                        help="Send only the status table + recommendation; skip SAR flip "
+                             "detection entirely. Leaves saved state untouched, so the "
+                             "frequent flip-alert schedule stays the sole owner of it.")
 
     args = parser.parse_args()
 
@@ -468,9 +472,9 @@ def main():
     print(f"Interval: {args.interval}")
     print(f"Signal Coin: {SAR_SYMBOL} (SAR Params: {SAR_AF0}/{SAR_MAX_AF})")
 
-    # Single-shot mode: one check, then exit (scheduled hourly by GitHub Actions).
+    # Single-shot mode: one check, then exit (scheduled by GitHub Actions).
     if args.once:
-        run_once(args.interval, args.coins)
+        run_once(args.interval, args.coins, status_only=args.status_only)
         return
 
     # Continuous mode: resume state and loop forever.
@@ -500,13 +504,18 @@ def _make_client():
     Client.API_URL = os.getenv("BINANCE_BASE_URL", "https://data-api.binance.vision/api")
     return Client(api_key, api_secret, requests_params={"timeout": 10})
 
-def check_and_notify(client, coins_list, b_interval, last_side):
+def check_and_notify(client, coins_list, b_interval, last_side, status_only=False):
     """
     Run a single check cycle: refresh the price table, evaluate the SAR signal on
     the last closed candle, and send an HOURLY Telegram status message (price
     table + SOL indicator readout). When SAR flips, the flip alert (filter
     breakdown + AI insight) is appended to that same message.
     Returns the new SAR side so the caller can persist / carry it forward.
+
+    status_only=True sends just the table + recommendation and skips flip
+    detection. The two live on separate schedules (flips every 5 min, status
+    hourly), so the status run must not consume a flip: whichever run detects
+    one writes the new side to state, and the other would then never report it.
     """
     # 1. General price table (console + Telegram status)
     data = get_binance_data(client, coins_list)
@@ -516,7 +525,10 @@ def check_and_notify(client, coins_list, b_interval, last_side):
 
     # 2. Check Signals with Indicators
     df = get_indicator_data(client, SAR_SYMBOL, b_interval)
-    new_side, signal_msg = check_signals(df, last_side)
+    if status_only:
+        new_side, signal_msg = last_side, None
+    else:
+        new_side, signal_msg = check_signals(df, last_side)
 
     # Extract latest *closed* candle values for logging / AI context
     latest_rsi = latest_adx = latest_ema = None
@@ -560,7 +572,7 @@ def check_and_notify(client, coins_list, b_interval, last_side):
 
     # 5. Assemble and send. The recommendation leads every message; the hourly
     #    status table follows (if enabled); the flip alert is appended on a flip.
-    send_status = SEND_STATUS_UPDATE and bool(table)
+    send_status = (status_only or SEND_STATUS_UPDATE) and bool(table)
     parts = []
     if send_status or flip_block:
         if rec_line:
@@ -576,7 +588,7 @@ def check_and_notify(client, coins_list, b_interval, last_side):
 
     return new_side
 
-def run_once(interval_str, coins_list):
+def run_once(interval_str, coins_list, status_only=False):
     """
     Single check-and-exit cycle. Ideal for scheduled runs (GitHub Actions / cron)
     where the process starts, checks once, and exits. State is read from and
@@ -585,9 +597,10 @@ def run_once(interval_str, coins_list):
     client = _make_client()
     b_interval = BINANCE_INTERVALS.get(interval_str, Client.KLINE_INTERVAL_1HOUR)
     print(f"Single-shot run: {interval_str} interval.")
-    last_side = get_last_signal_from_db()
+    last_side = None if status_only else get_last_signal_from_db()
     try:
-        check_and_notify(client, coins_list, b_interval, last_side)
+        check_and_notify(client, coins_list, b_interval, last_side,
+                         status_only=status_only)
     except Exception as e:
         print(f"Single-shot run error: {e}")
         send_telegram_message(f"⚠️ <b>Signal check failed</b>\nError: {e}")
