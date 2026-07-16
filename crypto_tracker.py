@@ -15,6 +15,7 @@ from binance.client import Client
 from datetime import datetime
 from dotenv import load_dotenv
 import json
+import re
 
 STATE_FILE = "crypto_state.json"
 
@@ -55,6 +56,12 @@ USE_EMA_FILTER = os.getenv("USE_EMA_FILTER", "true").lower() == "true"
 USE_ADX_FILTER = os.getenv("USE_ADX_FILTER", "true").lower() == "true"
 USE_RSI_FILTER = os.getenv("USE_RSI_FILTER", "true").lower() == "true"
 
+# --- HOURLY STATUS MESSAGE ---
+# When true, EVERY run sends a Telegram status message (price table + SOL
+# indicator readout). A SAR flip alert is appended to that same message.
+# Set SEND_STATUS_UPDATE=false to go back to flip-only alerts.
+SEND_STATUS_UPDATE = os.getenv("SEND_STATUS_UPDATE", "true").lower() == "true"
+
 # --- INTERVAL MAPS (shared by single-shot and continuous modes) ---
 INTERVAL_SECONDS = {
     "15m": 900,
@@ -72,22 +79,46 @@ BINANCE_INTERVALS = {
     "test": Client.KLINE_INTERVAL_1MINUTE,
 }
 
+# Tags we intentionally use in our messages; everything else is escaped so the
+# comparison operators in the filter text (e.g. "30.9 > 20.0", "Vol <= Avg")
+# can't be mistaken for HTML tags and break Telegram parsing.
+_KEEP_TAGS = ("<pre>", "</pre>", "<b>", "</b>")
+
+def _escape_html_keep_tags(text):
+    """HTML-escape the message but preserve our intentional <pre>/<b> tags."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for tag in _KEEP_TAGS:
+        escaped = tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(escaped, tag)
+    return text
+
 def send_telegram_message(text):
-    """Send a notification to Telegram."""
+    """
+    Send a notification to Telegram. Tries HTML (with our tags preserved);
+    if Telegram still rejects the entities, falls back to plain text so the
+    message is always delivered.
+    """
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[WARNING] Telegram credentials not found in .env")
         return False
-    
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Error sending Telegram message: {e}")
-        return False
+    plain = re.sub(r"</?(?:pre|b)>", "", text)  # strip our tags for the fallback
+    attempts = [
+        {"chat_id": chat_id, "text": _escape_html_keep_tags(text), "parse_mode": "HTML"},
+        {"chat_id": chat_id, "text": plain},
+    ]
+    for payload in attempts:
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                return True
+            print(f"Telegram send failed ({response.status_code}): {response.text[:200]}")
+        except Exception as e:
+            print(f"Error sending Telegram message: {e}")
+    return False
 
 def get_ai_analysis(symbol, price, side, data=None):
     """
@@ -438,21 +469,24 @@ def _make_client():
 
 def check_and_notify(client, coins_list, b_interval, last_side):
     """
-    Run a single check cycle: refresh the console price table, evaluate the SAR
-    signal on the last closed candle, and send a Telegram alert on a flip.
+    Run a single check cycle: refresh the price table, evaluate the SAR signal on
+    the last closed candle, and send an HOURLY Telegram status message (price
+    table + SOL indicator readout). When SAR flips, the flip alert (filter
+    breakdown + AI insight) is appended to that same message.
     Returns the new SAR side so the caller can persist / carry it forward.
     """
-    # 1. Update general price table in console
+    # 1. General price table (console + Telegram status)
     data = get_binance_data(client, coins_list)
-    if data:
-        print(format_notification(data))
+    table = format_notification(data) if data else ""
+    if table:
+        print(table)
 
     # 2. Check Signals with Indicators
     df = get_indicator_data(client, SAR_SYMBOL, b_interval)
     new_side, signal_msg = check_signals(df, last_side)
 
     # Extract latest *closed* candle values for logging / AI context
-    latest_rsi = None
+    latest_rsi = latest_adx = latest_ema = None
     if df is not None and len(df) >= 2:
         latest = df.iloc[-2]
         latest_rsi = latest[f"RSI_{RSI_PERIOD}"]
@@ -460,6 +494,14 @@ def check_and_notify(client, coins_list, b_interval, last_side):
         latest_ema = latest[f"EMA_{EMA_PERIOD}"]
         print(f"[{SAR_SYMBOL}] RSI: {latest_rsi:.1f} | ADX: {latest_adx:.1f} | EMA: {latest_ema:.2f}")
 
+    # 3. Build the hourly status message (price table + indicator readout)
+    indicator_line = ""
+    if latest_rsi is not None:
+        indicator_line = (f"\n[{SAR_SYMBOL}] RSI: {latest_rsi:.1f} | "
+                          f"ADX: {latest_adx:.1f} | EMA: {latest_ema:.2f}")
+    telegram_msg = f"<pre>{table}{indicator_line}</pre>" if (SEND_STATUS_UPDATE and table) else ""
+
+    # 4. On a SAR flip, append the signal alert (filters + AI insight)
     if signal_msg:
         print(f"[SIGNAL] {signal_msg.replace('<b>','').replace('</b>','')}")
 
@@ -471,13 +513,16 @@ def check_and_notify(client, coins_list, b_interval, last_side):
 
         # Get AI Analysis
         ai_insight = get_ai_analysis(SAR_SYMBOL, coin_data['price'] if coin_data else "Unknown", new_side, coin_data)
+        flip_block = signal_msg + f"\n\n🤖 <b>AI Insight:</b>\n{ai_insight}"
 
-        # Enhance Telegram message
-        full_msg = signal_msg + f"\n\n🤖 <b>AI Insight:</b>\n{ai_insight}"
-        send_telegram_message(full_msg)
+        telegram_msg = (telegram_msg + "\n\n" + flip_block) if telegram_msg else flip_block
 
         # Update persistent state
         save_signal_to_db(new_side)
+
+    # 5. Send the combined message (hourly status, plus flip alert if any)
+    if telegram_msg:
+        send_telegram_message(telegram_msg)
 
     return new_side
 
