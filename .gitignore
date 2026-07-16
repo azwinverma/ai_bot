@@ -1,0 +1,25 @@
+# --- Secrets: NEVER commit these ---
+.env
+service_account.json
+scratch/service_account_backup.json
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+
+# --- Local state & logs ---
+crypto_state.json
+bot.log
+
+# --- Bundled SDKs / build artifacts ---
+ok/
+*.zip
+
+# --- TMS/Selenium debug dumps ---
+*.png
+buy_button_blocked.html
+confirm_popup_source.html
+order_book_source.html
+post_confirm_debug.html
+tms_page_source.html

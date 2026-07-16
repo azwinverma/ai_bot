@@ -1,0 +1,44 @@
+name: Crypto SAR Signal
+
+# Runs the SAR-flip signal check every hour, in the cloud — no laptop needed.
+# State (last SAR side) is stored in Firestore, so each run continues seamlessly.
+on:
+  schedule:
+    # Every hour at :05, a few minutes after the hourly candle closes.
+    # NOTE: GitHub may delay scheduled runs by several minutes under load.
+    - cron: "5 * * * *"
+  # Lets you trigger a run manually from the Actions tab to test.
+  workflow_dispatch:
+
+jobs:
+  check-signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Firebase service account
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: printf '%s' "$SERVICE_ACCOUNT_JSON" > service_account.json
+
+      - name: Run one signal check
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Optional — if unset, the AI insight line is simply omitted.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+        run: python crypto_tracker.py --once --interval 1h
