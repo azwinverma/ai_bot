@@ -420,9 +420,20 @@ def main():
     run_bot(args.interval, args.coins)
 
 def _make_client():
-    """Build a Binance client from env credentials."""
+    """
+    Build a Binance client from env credentials.
+
+    Binance's main API (api.binance.com) geo-blocks many cloud IPs, including
+    GitHub Actions runners ("Service unavailable from a restricted location").
+    This bot only needs PUBLIC market data (klines + 24h ticker), which Binance
+    also serves — WITHOUT geo restrictions — from the data-only mirror
+    `data-api.binance.vision`. We point the client there by default so the same
+    code runs locally and in the cloud. Override with BINANCE_BASE_URL if needed.
+    """
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_SECRET_KEY")
+    # No {} placeholders, so python-binance's `.format(base_endpoint, tld)` is a no-op.
+    Client.API_URL = os.getenv("BINANCE_BASE_URL", "https://data-api.binance.vision/api")
     return Client(api_key, api_secret, requests_params={"timeout": 10})
 
 def check_and_notify(client, coins_list, b_interval, last_side):
