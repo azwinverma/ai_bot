@@ -394,6 +394,39 @@ def check_signals(df, last_side):
         
     return current_side, None
 
+def derive_recommendation(df):
+    """
+    Rule-based BUY / SELL / WAIT recommendation from the last CLOSED candle,
+    using the same signals as the alerts: SAR direction, EMA200 trend, ADX
+    strength and RSI. Returns (recommendation, reason) or None.
+    """
+    if df is None or len(df) < 3:
+        return None
+
+    latest = df.iloc[-2]
+    l_col = f"PSARl_{SAR_AF0}_{SAR_MAX_AF}"
+    sar_side = 'buy' if not pd.isna(latest[l_col]) else 'sell'
+    price = latest['close']
+    rsi = latest[f"RSI_{RSI_PERIOD}"]
+    adx = latest[f"ADX_{ADX_PERIOD}"]
+    ema = latest[f"EMA_{EMA_PERIOD}"]
+
+    is_bullish = price > ema
+    is_trending = adx > ADX_THRESHOLD
+
+    # Weak/sideways trend → SAR whipsaws → don't act.
+    if not is_trending:
+        return "WAIT", f"ADX {adx:.1f} ≤ {ADX_THRESHOLD:.0f} (weak/sideways — SAR unreliable)"
+
+    if sar_side == 'buy':
+        if is_bullish and rsi <= RSI_BUY_THRESHOLD:
+            return "BUY", f"SAR buy, price above EMA{EMA_PERIOD}, RSI {rsi:.1f} supportive"
+        return "WAIT", f"SAR buy but trend/RSI not aligned (RSI {rsi:.1f}, {'bullish' if is_bullish else 'bearish'} vs EMA)"
+    else:
+        if (not is_bullish) and rsi >= RSI_SELL_THRESHOLD:
+            return "SELL", f"SAR sell, price below EMA{EMA_PERIOD}, RSI {rsi:.1f} supportive"
+        return "WAIT", f"SAR sell but trend/RSI not aligned (RSI {rsi:.1f}, {'bullish' if is_bullish else 'bearish'} vs EMA)"
+
 def get_binance_data(client, symbols):
     """Fetch current price and 24h volume for symbols."""
     data = {}
@@ -494,14 +527,21 @@ def check_and_notify(client, coins_list, b_interval, last_side):
         latest_ema = latest[f"EMA_{EMA_PERIOD}"]
         print(f"[{SAR_SYMBOL}] RSI: {latest_rsi:.1f} | ADX: {latest_adx:.1f} | EMA: {latest_ema:.2f}")
 
-    # 3. Build the hourly status message (price table + indicator readout)
+    # 3. Rule-based recommendation (BUY / SELL / WAIT) from the closed candle
+    rec = derive_recommendation(df)
+    rec_line = ""
+    if rec:
+        icon = {"BUY": "🟢", "SELL": "🔴", "WAIT": "🟡"}.get(rec[0], "🎯")
+        rec_line = f"{icon} <b>Recommendation: {rec[0]}</b>\n{rec[1]}"
+        print(f"[RECOMMENDATION] {rec[0]} — {rec[1]}")
+
     indicator_line = ""
     if latest_rsi is not None:
         indicator_line = (f"\n[{SAR_SYMBOL}] RSI: {latest_rsi:.1f} | "
                           f"ADX: {latest_adx:.1f} | EMA: {latest_ema:.2f}")
-    telegram_msg = f"<pre>{table}{indicator_line}</pre>" if (SEND_STATUS_UPDATE and table) else ""
 
-    # 4. On a SAR flip, append the signal alert (filters + AI insight)
+    # 4. On a SAR flip, build the signal alert (filters + AI insight)
+    flip_block = ""
     if signal_msg:
         print(f"[SIGNAL] {signal_msg.replace('<b>','').replace('</b>','')}")
 
@@ -515,12 +555,22 @@ def check_and_notify(client, coins_list, b_interval, last_side):
         ai_insight = get_ai_analysis(SAR_SYMBOL, coin_data['price'] if coin_data else "Unknown", new_side, coin_data)
         flip_block = signal_msg + f"\n\n🤖 <b>AI Insight:</b>\n{ai_insight}"
 
-        telegram_msg = (telegram_msg + "\n\n" + flip_block) if telegram_msg else flip_block
-
         # Update persistent state
         save_signal_to_db(new_side)
 
-    # 5. Send the combined message (hourly status, plus flip alert if any)
+    # 5. Assemble and send. The recommendation leads every message; the hourly
+    #    status table follows (if enabled); the flip alert is appended on a flip.
+    send_status = SEND_STATUS_UPDATE and bool(table)
+    parts = []
+    if send_status or flip_block:
+        if rec_line:
+            parts.append(rec_line)
+        if send_status:
+            parts.append(f"<pre>{table}{indicator_line}</pre>")
+        if flip_block:
+            parts.append(flip_block)
+
+    telegram_msg = "\n\n".join(parts)
     if telegram_msg:
         send_telegram_message(telegram_msg)
 
