@@ -1,7 +1,9 @@
 name: Crypto SAR Signal
 
 # Runs the SAR-flip signal check every hour, in the cloud — no laptop needed.
-# State (last SAR side) is stored in Firestore, so each run continues seamlessly.
+# The bot's last SAR side is stored in crypto_state.json, which this workflow
+# commits back to the repo whenever it changes, so hourly runs continue
+# seamlessly across GitHub's ephemeral runners.
 on:
   schedule:
     # Every hour at :05, a few minutes after the hourly candle closes.
@@ -9,6 +11,15 @@ on:
     - cron: "5 * * * *"
   # Lets you trigger a run manually from the Actions tab to test.
   workflow_dispatch:
+
+# Needed so the job can commit the updated state file back to the repo.
+permissions:
+  contents: write
+
+# Avoid overlapping runs racing on the state file.
+concurrency:
+  group: crypto-signal
+  cancel-in-progress: false
 
 jobs:
   check-signal:
@@ -27,11 +38,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write Firebase service account
-        env:
-          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        run: printf '%s' "$SERVICE_ACCOUNT_JSON" > service_account.json
-
       - name: Run one signal check
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
@@ -42,3 +48,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
         run: python crypto_tracker.py --once --interval 1h
+
+      - name: Persist state if SAR flipped
+        run: |
+          if ! git diff --quiet -- crypto_state.json; then
+            echo "SAR state changed — committing."
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add crypto_state.json
+            git commit -m "chore: update SAR state [skip ci]"
+            git push
+          else
+            echo "No SAR flip this run — nothing to persist."
+          fi

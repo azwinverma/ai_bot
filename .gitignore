@@ -8,9 +8,10 @@ venv/
 __pycache__/
 *.pyc
 
-# --- Local state & logs ---
-crypto_state.json
+# --- Local logs ---
 bot.log
+# NOTE: crypto_state.json is intentionally TRACKED — the hourly GitHub Action
+# commits it back so the bot remembers the last SAR side between cloud runs.
 
 # --- Bundled SDKs / build artifacts ---
 ok/

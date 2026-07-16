@@ -1,13 +1,16 @@
 # Run the crypto signal bot 24/7 with GitHub Actions (free)
 
 Your laptop no longer needs to stay on. GitHub runs the hourly check in the cloud.
-Because the bot stores its last SAR state in **Firestore**, each hourly run continues
-exactly where the previous one left off.
+The bot's last SAR side is stored in **`crypto_state.json`, which the workflow commits
+back to the repo** whenever it changes — so each hourly run continues exactly where the
+previous one left off, with no external database required.
 
 ## How it works
 - `.github/workflows/crypto-signal.yml` runs every hour (`cron: "5 * * * *"`).
 - Each run does one `python crypto_tracker.py --once --interval 1h` and exits.
-- If SAR flips (evaluated on the last *closed* candle), you get a Telegram alert.
+- If SAR flips (evaluated on the last *closed* candle), you get a Telegram alert
+  **and** the new state is committed back to `crypto_state.json` (commits only happen
+  on a flip, so the repo stays quiet otherwise).
 
 ## One-time setup
 
@@ -35,8 +38,11 @@ Add each of these (values come from your local `.env`):
 | `BINANCE_SECRET_KEY` | your Binance secret |
 | `TELEGRAM_BOT_TOKEN` | your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | your Telegram chat id |
-| `SERVICE_ACCOUNT_JSON` | **paste the entire contents** of `service_account.json` |
 | `ANTHROPIC_API_KEY` | (optional) for the AI insight line |
+
+> State is kept in `crypto_state.json` in the repo, so **no Firebase / service
+> account is needed** for the hourly signal — those are only used by the local
+> dashboard (`app.py`).
 
 Optional model override: under the **Variables** tab add `ANTHROPIC_MODEL`
 (e.g. `claude-sonnet-5`). If unset, the code default is used.
@@ -51,9 +57,9 @@ message is only sent when SAR actually flips (or if there's an error).
   hourly signals, but not second-precise.
 - **Inactivity:** GitHub disables scheduled workflows after ~60 days with **no repo
   activity**. Any push (or clicking "Enable workflow") resets that.
-- **State lives in Firestore**, not on the runner — the runner is wiped after each
-  run, so Firestore is what makes hourly continuity work. Keep `SERVICE_ACCOUNT_JSON`
-  valid.
+- **State lives in `crypto_state.json` in the repo**, not on the runner — the runner
+  is wiped after each run. The workflow commits the file back (only on a flip), which
+  is what makes hourly continuity work. Don't delete that file.
 - **Want more frequent alerts?** change the cron (e.g. `"*/15 * * * *"` for every
   15 min) and pass `--interval 15m`.
 
