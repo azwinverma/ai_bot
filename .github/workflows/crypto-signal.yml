@@ -1,25 +1,25 @@
 name: Crypto SAR Signal
 
-# Polls for a SAR flip on the last CLOSED hourly candle, in the cloud — no
-# laptop needed. The bot's last SAR side is stored in crypto_state.json, which
-# this workflow commits back to the repo whenever it changes, so runs continue
-# seamlessly across GitHub's ephemeral runners.
+# Sends the hourly status message (price table + indicators + BUY/SELL/WAIT)
+# and, on a SAR flip of the last CLOSED hourly candle, the flip alert. The
+# bot's last SAR side is stored in crypto_state.json, which this workflow
+# commits back to the repo whenever it changes, so runs continue seamlessly
+# across GitHub's ephemeral runners.
 #
-# The hourly status message lives in crypto-status.yml. This workflow is
-# flip-alerts only (SEND_STATUS_UPDATE=false) — at this cadence the status
-# table would otherwise arrive 288x a day.
+# This MUST stay the repo's only scheduled workflow. Measured over 12h,
+# GitHub delivers this repo ~1 scheduled run per HOUR in total, no matter what
+# is requested: a */5 cron here returned 6.5% of its runs, and splitting the
+# status message into a second workflow made both worse — the two competed for
+# that single hourly slot and the status message degraded to every 2-4h.
+# Adding another scheduled workflow, or a tighter cron, takes runs away from
+# this one rather than adding any.
 on:
   schedule:
-    # Every 5 minutes — GitHub's shortest allowed interval.
-    #
-    # This is deliberately far more often than the 1h candle it watches.
-    # GitHub's scheduler is best-effort: it delays scheduled runs under load and
-    # silently DROPS them entirely at peak, which is what made hourly runs land
-    # up to 2h apart. Flip detection compares the closed candle against saved
-    # state, not against the previous run, so it is idempotent — a dropped tick
-    # costs nothing and the next one still catches the flip. Polling often turns
-    # GitHub's unreliability from a 2h gap into a ~15min worst case.
-    - cron: "*/5 * * * *"
+    # Hourly at :05, shortly after the 1h candle closes. GitHub still delays
+    # and drops these (observed gaps: 1-3h) — it is best-effort and there is no
+    # cron setting that fixes it. Low-latency alerting needs an always-on host
+    # running run_bot(), not this workflow.
+    - cron: "5 * * * *"
   # Lets you trigger a run manually from the Actions tab to test.
   workflow_dispatch:
 
@@ -55,8 +55,6 @@ jobs:
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Flip alerts only — the status table is crypto-status.yml's job.
-          SEND_STATUS_UPDATE: "false"
           # Optional — if unset, the AI insight line is simply omitted.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
