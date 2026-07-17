@@ -1,0 +1,30 @@
+[Unit]
+Description=Crypto SAR Signal Bot (always-on engine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai_bot
+EnvironmentFile=/home/ubuntu/ai_bot/.env
+ExecStart=/home/ubuntu/ai_bot/venv/bin/python crypto_tracker.py --interval 1h
+
+# run_bot() now survives per-cycle errors on its own, so a process exit here
+# means something it could not handle (OOM, a bad deploy, systemctl restart).
+# Always bring it back: an unattended trading bot that stays down is the whole
+# failure mode we moved off GitHub Actions to avoid.
+Restart=always
+RestartSec=30
+
+# Do not let a crash-loop hammer Telegram/Binance: after 5 failures in 5 min
+# systemd would normally give up entirely, which would leave the bot dead.
+# StartLimitIntervalSec=0 disables that give-up so it retries forever.
+StartLimitIntervalSec=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-bot
+
+[Install]
+WantedBy=multi-user.target

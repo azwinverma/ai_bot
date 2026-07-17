@@ -605,25 +605,56 @@ def run_once(interval_str, coins_list, status_only=False):
         print(f"Single-shot run error: {e}")
         send_telegram_message(f"⚠️ <b>Signal check failed</b>\nError: {e}")
 
+def _seconds_until_next_close(period_seconds, buffer_seconds=20):
+    """
+    Seconds to wait until just after the next candle close.
+
+    Sleeping a flat period_seconds instead would drift: each cycle starts a
+    little later than the last (the check itself takes seconds), so checks
+    creep away from the close and eventually read a candle that is still open.
+    Anchoring to the wall clock keeps every wake-up just past a real boundary.
+    """
+    now = time.time()
+    return (period_seconds - (now % period_seconds)) + buffer_seconds
+
 def run_bot(interval_str, coins_list):
     """Continuous execution engine (loops forever). Used for always-on hosting / threads."""
     client = _make_client()
-    sleep_time = INTERVAL_SECONDS.get(interval_str, 3600)
+    period = INTERVAL_SECONDS.get(interval_str, 3600)
     b_interval = BINANCE_INTERVALS.get(interval_str, Client.KLINE_INTERVAL_1HOUR)
 
     print(f"Engine Starting: {interval_str} interval.")
 
     last_side = get_last_signal_from_db()
 
-    try:
-        while True:
+    consecutive_errors = 0
+    while True:
+        # Per-cycle, NOT around the loop: a transient network blip or Binance
+        # 5xx must not end the process. This engine is meant to run unattended
+        # for weeks, where exiting on the first hiccup means silent death until
+        # someone notices the missing messages.
+        try:
             last_side = check_and_notify(client, coins_list, b_interval, last_side)
-            print(f"Wait for {interval_str}...")
-            time.sleep(sleep_time)
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            print(f"Cycle error ({consecutive_errors}): {e}")
+            # Alert once on the first failure only. Telegram-spamming every
+            # cycle during an outage would bury the flip alerts that matter.
+            if consecutive_errors == 1:
+                try:
+                    send_telegram_message(f"⚠️ <b>Signal check failed</b>\nError: {e}\nRetrying next candle.")
+                except Exception:
+                    pass
+            # Rebuild the client — a poisoned session survives otherwise.
+            try:
+                client = _make_client()
+            except Exception:
+                pass
 
-    except Exception as e:
-        print(f"Bot Engine Error: {e}")
-        send_telegram_message(f"⚠️ <b>Bot Engine Stopped</b>\nError: {e}")
+        wait = _seconds_until_next_close(period)
+        print(f"Next check in {wait/60:.1f} min (aligned to {interval_str} close)...")
+        time.sleep(wait)
 
 if __name__ == "__main__":
     main()
